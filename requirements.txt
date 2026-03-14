@@ -1,0 +1,21 @@
+# Web framework
+fastapi==0.111.0
+uvicorn==0.29.0          # ASGI server to run FastAPI
+
+# Database
+sqlalchemy==2.0.30       # ORM — used in database.py and models.py
+psycopg2-binary==2.9.9   # PostgreSQL driver SQLAlchemy talks through
+
+# Validation
+pydantic==2.7.1          # Request/response schemas in schemas.py
+pydantic-settings==2.2.1 # Reads .env file into a Settings object
+
+# ETL helpers
+pandas==2.2.2            # CSV loading + merge in etl_pipeline.py
+requests==2.31.0         # HTTP calls to CoinGecko in etl_pipeline.py
+
+# Scheduling (optional but wired in main.py)
+apscheduler==3.10.4
+
+# Utilities
+python-dotenv==1.0.1     # Loads .env into os.environ at startup
