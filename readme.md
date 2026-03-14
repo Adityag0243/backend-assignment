@@ -1,4 +1,3 @@
-# Backend Assignment
 # Crypto ETL Service
 
 Mini ETL pipeline: pulls crypto market data from CoinGecko + a local CSV,
@@ -61,12 +60,35 @@ GET http://localhost:8000/health   → { "status": "ok" }
 GET http://localhost:8000/docs     → Swagger UI
 ```
 
-## API endpoints
+## Deploying to Render
 
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/health` | Server health check |
-| POST | `/etl/run` | Trigger ETL pipeline |
-| GET | `/etl/jobs` | ETL run history |
-| GET | `/assets` | All assets (optional filters) |
-| GET | `/assets/{symbol}` | Single asset by symbol |
+### 1. Push to GitHub
+```bash
+git init && git add . && git commit -m "initial"
+git remote add origin https://github.com/YOUR_USERNAME/crypto-etl.git
+git push -u origin main
+```
+
+### 2. Create a PostgreSQL database on Render
+- Render Dashboard → New → PostgreSQL
+- Copy the **Internal Database URL** (used within Render's network)
+
+### 3. Create a Web Service on Render
+- New → Web Service → connect your GitHub repo
+- **Environment:** Python 3
+- **Build command:** `pip install -r requirements.txt`
+- **Start command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
+### 4. Set environment variables in Render
+```
+DATABASE_URL      = <Internal Database URL from step 2>
+COINGECKO_BASE_URL = https://api.coingecko.com/api/v3
+CSV_PATH          = data/crypto_metadata.csv
+```
+
+### 5. Deploy and verify
+```
+GET https://your-service.onrender.com/health   → {"status": "ok"}
+GET https://your-service.onrender.com/docs     → Swagger UI
+POST https://your-service.onrender.com/etl/run → triggers the pipeline
+```

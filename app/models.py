@@ -22,7 +22,7 @@ TABLES CREATED:
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import BigInteger, Float, Integer, Text, Timestamp
+from sqlalchemy import BigInteger, Float, Integer, Text, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -74,7 +74,7 @@ class CryptoAsset(Base):
     # Timestamp of the ETL run that last wrote this row.
     # Set in etl_pipeline.py transform step. Stored as UTC.
     last_updated: Mapped[datetime | None] = mapped_column(
-        Timestamp(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True
     )
 
     def __repr__(self) -> str:
@@ -114,14 +114,14 @@ class ETLJob(Base):
 
     # UTC timestamp when run_pipeline() was called
     started_at: Mapped[datetime] = mapped_column(
-        Timestamp(timezone=True),
+        DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
 
     # UTC timestamp when the pipeline finished (success or fail)
     finished_at: Mapped[datetime | None] = mapped_column(
-        Timestamp(timezone=True), nullable=True
+        DateTime(timezone=True), nullable=True
     )
 
     # Populated only on failure — the exception message
