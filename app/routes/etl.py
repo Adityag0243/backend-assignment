@@ -10,7 +10,13 @@ ENDPOINTS:
 
 WHAT COMES IN:
   POST /etl/run:
-    No request body needed — just the HTTP POST itself triggers the run.
+    Optional JSON body (all fields have defaults, empty body works fine):
+      {
+        "per_page":    10,               // 1–250, how many coins to fetch
+        "page":        1,               // which page of results
+        "vs_currency": "usd",          // pricing currency
+        "order":       "market_cap_desc"  // sort order
+      }
     db session injected by FastAPI via Depends(get_db).
 
   GET /etl/jobs:
@@ -18,8 +24,8 @@ WHAT COMES IN:
       ?limit=N  (default 20) — how many recent jobs to return
 
 WHAT GOES OUT:
-  POST /etl/run  → calls run_pipeline(db) in etl_pipeline.py
-                 → returns ETLRunResponse (job_id + status)
+  POST /etl/run  → calls run_pipeline(db, **params) in etl_pipeline.py
+                 → returns ETLRunResponse (job_id + status + records_processed)
 
   GET /etl/jobs  → queries etl_jobs table via SQLAlchemy
                  → returns list[ETLJobResponse]
@@ -28,24 +34,22 @@ DEPENDS ON:
   app/database.py       → get_db() session dependency
   app/etl_pipeline.py   → run_pipeline()
   app/models.py         → ETLJob ORM model (for the SELECT query)
-  app/schemas.py        → ETLRunResponse, ETLJobResponse
+  app/schemas.py        → ETLRunRequest, ETLRunResponse, ETLJobResponse
 """
 
 import logging
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.etl_pipeline import run_pipeline
 from app.models import ETLJob
-from app.schemas import ETLJobResponse, ETLRunResponse
+from app.schemas import ETLJobResponse, ETLRunRequest, ETLRunResponse
 
 logger = logging.getLogger(__name__)
 
-# APIRouter groups these endpoints under the /etl prefix
-# (the prefix is set in main.py when we do app.include_router)
 router = APIRouter()
 
 
@@ -55,29 +59,50 @@ router = APIRouter()
     response_model=ETLRunResponse,
     summary="Trigger ETL pipeline",
     description=(
-        "Runs the full Extract → Transform → Load pipeline synchronously. "
-        "Creates an etl_jobs audit record, fetches CoinGecko data, merges "
-        "with CSV metadata, and upserts into crypto_assets."
+        "Runs the full Extract → Transform → Load pipeline.\n\n"
+        "All request body fields are **optional** — omit the body entirely "
+        "to use the defaults (top 10 coins by market cap, priced in USD).\n\n"
+        "**Examples:**\n"
+        "- `{}` — top 10 coins, USD, market cap order (same as always)\n"
+        "- `{\"per_page\": 50}` — top 50 coins\n"
+        "- `{\"page\": 2, \"per_page\": 10}` — coins ranked 11–20\n"
+        "- `{\"vs_currency\": \"eur\"}` — prices in EUR\n"
+        "- `{\"order\": \"volume_desc\"}` — top coins by 24h trading volume"
     ),
 )
-def trigger_etl(db: Session = Depends(get_db)):
+def trigger_etl(
+    params: ETLRunRequest = ETLRunRequest(),  # entire body is optional — defaults kick in if omitted
+    db: Session = Depends(get_db),
+):
     """
-    Triggers the ETL pipeline.
+    Triggers the ETL pipeline with optional configuration.
 
     FLOW:
-      1. FastAPI injects a DB session via Depends(get_db)
-      2. We call run_pipeline(db) which handles the full ETL + job tracking
-      3. run_pipeline returns {"job_id": "...", "status": "success"|"failed"}
-      4. FastAPI serialises that dict through ETLRunResponse and returns JSON
+      1. FastAPI validates the request body against ETLRunRequest
+         (or uses all defaults if the body is empty/omitted)
+      2. We unpack params and call run_pipeline(db, ...)
+      3. run_pipeline returns {"job_id": "...", "status": ..., "records_processed": N}
+      4. FastAPI serialises through ETLRunResponse and returns JSON
 
-    WHY NO try/except HERE:
-      run_pipeline() catches all exceptions internally and writes them to
-      etl_jobs.error_message. It always returns a dict — never raises.
-      So HTTP 500s from this endpoint mean the server itself crashed,
-      not the pipeline failing (that's a 200 with status="failed").
+    WHY THE BODY IS OPTIONAL:
+      ETLRunRequest() with no args produces all defaults.
+      Assigning it as the default value of `params` means FastAPI treats
+      an empty or missing body as valid — backwards compatible with existing callers.
     """
-    logger.info("[Route] POST /etl/run — starting pipeline")
-    result = run_pipeline(db)
+    logger.info(
+        f"[Route] POST /etl/run — "
+        f"page={params.page} per_page={params.per_page} "
+        f"currency={params.vs_currency} order={params.order}"
+    )
+
+    result = run_pipeline(
+        db,
+        page=params.page,
+        per_page=params.per_page,
+        vs_currency=params.vs_currency,
+        order=params.order,
+    )
+
     logger.info(f"[Route] POST /etl/run — job {result['job_id']} → {result['status']}")
     return result
 

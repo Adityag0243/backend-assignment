@@ -133,16 +133,23 @@ def extract_from_csv() -> list[dict]:
 # ══════════════════════════════════════════════════════════════════════════════
 
 @retry_with_backoff(max_attempts=3, base_delay=1.0)
-def _fetch_coingecko_page(page: int) -> list[dict]:
+def _fetch_coingecko_page(
+    page: int,
+    per_page: int = 10,
+    vs_currency: str = "usd",
+    order: str = "market_cap_desc",
+) -> list[dict]:
     """
-    Private helper — fetches a single page from the CoinGecko /coins/markets endpoint.
+    Private helper — fetches one page from CoinGecko /coins/markets.
     Decorated with @retry_with_backoff so retries + 429 handling are automatic.
 
     Called by: extract_from_api()
-    NOT called directly by anything else.
 
     Args:
-        page: page number (1-indexed)
+        page:        Page number (1-indexed)
+        per_page:    Coins per page (1–250, free tier limit)
+        vs_currency: Pricing currency, e.g. "usd", "eur", "inr"
+        order:       Sort order, e.g. "market_cap_desc", "volume_asc"
 
     Returns:
         Raw JSON list from the API response
@@ -153,13 +160,16 @@ def _fetch_coingecko_page(page: int) -> list[dict]:
     """
     url = f"{COINGECKO_BASE_URL}/coins/markets"
     params = {
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": 10,
-        "page": page,
+        "vs_currency": vs_currency,
+        "order":       order,
+        "per_page":    per_page,
+        "page":        page,
     }
 
-    logger.info(f"[Extract API] GET {url} page={page}")
+    logger.info(
+        f"[Extract API] GET {url} "
+        f"page={page} per_page={per_page} currency={vs_currency} order={order}"
+    )
     response = requests.get(url, params=params, timeout=10)
 
     # raise_for_status() converts 4xx/5xx into requests.HTTPError
@@ -169,32 +179,44 @@ def _fetch_coingecko_page(page: int) -> list[dict]:
     return response.json()
 
 
-def extract_from_api() -> list[dict]:
+def extract_from_api(
+    page: int = 1,
+    per_page: int = 10,
+    vs_currency: str = "usd",
+    order: str = "market_cap_desc",
+) -> list[dict]:
     """
-    Stage 4b — Fetch the top 10 coins by market cap from CoinGecko.
+    Stage 4b — Fetch coins from CoinGecko with configurable pagination.
 
     SOURCE:  GET https://api.coingecko.com/api/v3/coins/markets
     FIELDS KEPT: id, symbol, name, current_price, market_cap,
                  price_change_percentage_24h
 
-    NORMALISATION done here:
-      - symbol → lowercase  (CoinGecko already returns lowercase, but be safe)
-      - Only the 6 required fields are kept — everything else from the API
-        response is discarded to keep our data model clean
+    Args:
+        page:        Which page to fetch (default 1 = top coins)
+        per_page:    How many coins to fetch (default 10, max 250)
+        vs_currency: Pricing currency (default "usd")
+        order:       Sort order (default "market_cap_desc")
+
+    EXAMPLES:
+      extract_from_api()                         → top 10 by market cap in USD
+      extract_from_api(per_page=50)              → top 50
+      extract_from_api(page=2, per_page=10)      → coins ranked 11–20
+      extract_from_api(vs_currency="eur")        → priced in EUR
+      extract_from_api(order="volume_desc")      → top 10 by 24h volume
 
     RETURNS:
-      list[dict] — one dict per coin, e.g.:
-        [
-          {"symbol": "btc", "name": "Bitcoin",
-           "current_price": 65000.0, "market_cap": 1280000000000,
-           "price_change_percentage_24h": 1.23},
-          ...
-        ]
+      list[dict] — one dict per coin with 6 normalised fields
 
     RAISES:
-      requests.HTTPError after 3 failed attempts (re-raised by retry decorator)
+      requests.HTTPError after all retry attempts exhausted
     """
-    raw_coins = _fetch_coingecko_page(page=1)
+    raw_coins = _fetch_coingecko_page(
+        page=page,
+        per_page=per_page,
+        vs_currency=vs_currency,
+        order=order,
+    )
 
     # ── Keep only the fields we need, normalise symbol case ───────────────────
     coins = []
@@ -382,17 +404,30 @@ def load(rows: list[dict], db) -> int:
 # STAGE 5 — Orchestrator: run_pipeline()
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_pipeline(db) -> dict:
+def run_pipeline(
+    db,
+    page: int = 1,
+    per_page: int = 10,
+    vs_currency: str = "usd",
+    order: str = "market_cap_desc",
+) -> dict:
     """
     Orchestrates the full ETL pipeline: Extract → Transform → Load.
     Creates and updates an ETLJob audit record throughout.
 
     WHAT COMES IN:
-      db — SQLAlchemy Session from routes/etl.py via Depends(get_db)
+      db          — SQLAlchemy Session from routes/etl.py via Depends(get_db)
+      page        — CoinGecko page number (default 1)
+      per_page    — coins to fetch per page (default 10, max 250)
+      vs_currency — pricing currency (default "usd")
+      order       — sort order (default "market_cap_desc")
+
+    All params have defaults so calling run_pipeline(db) with no extra args
+    works identically to before this change.
 
     WHAT GOES OUT:
       dict → back to routes/etl.py as the API response body:
-        {"job_id": "uuid-string", "status": "success" | "failed"}
+        {"job_id": "...", "status": "success"|"failed", "records_processed": N}
 
     JOB LIFECYCLE:
       1. Create ETLJob row with status="running", started_at=now
@@ -401,12 +436,7 @@ def run_pipeline(db) -> dict:
       4a. Success → update status="success", records_processed=N, finished_at=now
       4b. Failure → update status="failed", error_message=str(exc), finished_at=now
       5. Commit final status
-      6. Return job_id + status to the route handler
-
-    DATA LINEAGE:
-      Every ETL run is tracked in etl_jobs regardless of success or failure.
-      The error_message field captures the full exception for debugging.
-      This satisfies the "Data Lineage Tracking" requirement.
+      6. Return job_id + status + records_processed to the route handler
     """
     import uuid as _uuid
     from app.models import ETLJob
@@ -419,13 +449,21 @@ def run_pipeline(db) -> dict:
     )
     db.add(job)
     db.commit()  # commit now so GET /etl/jobs shows "running" immediately
-    logger.info(f"[Pipeline] Started job {job.job_id}")
+    logger.info(
+        f"[Pipeline] Started job {job.job_id} — "
+        f"page={page} per_page={per_page} currency={vs_currency} order={order}"
+    )
 
     # ── Steps 2–4: Run ETL with full error capture ────────────────────────────
     try:
-        # EXTRACT
-        api_coins = extract_from_api()    # → list[dict] from CoinGecko
-        csv_rows  = extract_from_csv()    # → list[dict] from CSV
+        # EXTRACT — pass all params down to the API fetcher
+        api_coins = extract_from_api(
+            page=page,
+            per_page=per_page,
+            vs_currency=vs_currency,
+            order=order,
+        )
+        csv_rows = extract_from_csv()    # CSV params don't change
 
         # TRANSFORM
         merged = transform(api_coins, csv_rows)  # → list[dict] final schema
@@ -436,11 +474,12 @@ def run_pipeline(db) -> dict:
         # ── Step 4a: Mark success ─────────────────────────────────────────────
         job.status             = "success"
         job.records_processed  = count
+
         job.finished_at        = datetime.now(timezone.utc)
         db.commit()
 
         logger.info(f"[Pipeline] Job {job.job_id} succeeded — {count} records processed")
-        return {"job_id": job.job_id, "status": "success"}
+        return {"job_id": job.job_id, "status": "success", "records_processed": count}
 
     except Exception as exc:
         # ── Step 4b: Mark failure — capture the error message ─────────────────
@@ -454,4 +493,4 @@ def run_pipeline(db) -> dict:
         db.commit()
 
         logger.error(f"[Pipeline] Job {job.job_id} failed: {exc}", exc_info=True)
-        return {"job_id": job.job_id, "status": "failed"}
+        return {"job_id": job.job_id, "status": "failed", "records_processed": 0}

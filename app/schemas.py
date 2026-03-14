@@ -2,7 +2,7 @@
 schemas.py
 ──────────
 WHAT THIS FILE IS:
-  Pydantic models that define the exact shape of every API response.
+  Pydantic models that define the exact shape of every API request and response.
   These are NOT the database models (those live in models.py).
   These are the JSON contracts we expose to API callers.
 
@@ -17,9 +17,10 @@ WHAT COMES IN:
   routes/etl.py). FastAPI serialises them using these schemas.
 
 WHAT GOES OUT:
+  → ETLRunRequest        to routes/etl.py     (POST /etl/run  request body)
   → CryptoAssetResponse  to routes/assets.py  (GET /assets, GET /assets/{symbol})
   → ETLJobResponse       to routes/etl.py     (GET /etl/jobs)
-  → ETLRunResponse       to routes/etl.py     (POST /etl/run)
+  → ETLRunResponse       to routes/etl.py     (POST /etl/run  response)
 
 model_config = ConfigDict(from_attributes=True):
   Tells Pydantic to read values from ORM object attributes (e.g. asset.price)
@@ -27,8 +28,73 @@ model_config = ConfigDict(from_attributes=True):
 """
 
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, ConfigDict
+from typing import Literal, Optional
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ── Request: POST /etl/run ─────────────────────────────────────────────────────
+class ETLRunRequest(BaseModel):
+    """
+    Optional request body for POST /etl/run.
+
+    All fields have defaults so calling POST /etl/run with an empty body
+    works exactly as before. Override any field to customise the pipeline run.
+
+    Example body (all optional):
+      {
+        "per_page": 20,
+        "page": 1,
+        "vs_currency": "usd",
+        "order": "market_cap_desc"
+      }
+    """
+
+    per_page: int = Field(
+        default=10,
+        ge=1,
+        le=250,
+        description=(
+            "How many coins to fetch from CoinGecko per page. "
+            "Free tier supports up to 250. Default: 10."
+        ),
+    )
+
+    page: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Which page of CoinGecko results to fetch (1-indexed). "
+            "page=1 per_page=10 → top 10 coins. "
+            "page=2 per_page=10 → coins ranked 11–20. "
+            "Default: 1."
+        ),
+    )
+
+    vs_currency: str = Field(
+        default="usd",
+        min_length=3,
+        max_length=10,
+        description=(
+            "Currency to price coins in. "
+            "Any CoinGecko-supported currency code (e.g. usd, eur, inr, btc). "
+            "Default: usd."
+        ),
+    )
+
+    order: Literal[
+        "market_cap_desc",
+        "market_cap_asc",
+        "volume_desc",
+        "volume_asc",
+        "id_desc",
+        "id_asc",
+    ] = Field(
+        default="market_cap_desc",
+        description=(
+            "How to sort results from CoinGecko. "
+            "Default: market_cap_desc (highest market cap first)."
+        ),
+    )
 
 
 # ── Response: single crypto asset ─────────────────────────────────────────────
@@ -85,5 +151,6 @@ class ETLRunResponse(BaseModel):
     "running" would only appear if we moved to background tasks later.
     """
 
-    job_id: str
-    status: str   # "success" | "failed"
+    job_id:           str
+    status:           str              # "success" | "failed"
+    records_processed: Optional[int]  = None  # how many rows upserted
